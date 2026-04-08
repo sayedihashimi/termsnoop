@@ -10,7 +10,7 @@ recent output from another terminal without the user needing to copy/paste.
 
 ```
 Terminal A (AI CLI)                Terminal B (User's work)
-┌──────────────────────┐          ┌────────────────────────────│─┐
+┌──────────────────────┐          ┌──────────────────────────────┐
 │  copilot cli         │          │  $ termsnoop                 │
 │                      │          │  () Session abc1234 started  │
 │  > "check terminal"  │          │  $ npm run build             │
