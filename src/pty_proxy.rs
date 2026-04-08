@@ -27,7 +27,7 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
     let session_dir = session::session_dir(&meta.id)?;
 
     // Write shell integration init script (if available for this shell)
-    let init_script_path = write_init_script(&session_dir, &shell_cmd);
+    let init_script_path = write_init_script(&session_dir, &shell_cmd, cfg.command_history_size);
 
     eprintln!("🟢 Session {} started (shell: {})", meta.id, shell_cmd);
     eprintln!("   Logging to: {}", session_dir.display());
@@ -52,6 +52,10 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
     let mut cmd = build_shell_command(&shell_cmd, &init_script_path);
     cmd.cwd(std::env::current_dir().unwrap_or_default());
     cmd.env("TERMSNOOP_SESSION", &meta.id);
+    cmd.env(
+        "TERMSNOOP_HISTORY_SIZE",
+        &cfg.command_history_size.to_string(),
+    );
 
     let mut child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
@@ -114,8 +118,8 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
 // ---------------------------------------------------------------------------
 
 /// Write the shell integration init script to the session directory.
-fn write_init_script(session_dir: &PathBuf, shell: &str) -> Option<PathBuf> {
-    let script = ShellIntegration::init_script(shell)?;
+fn write_init_script(session_dir: &PathBuf, shell: &str, history_size: usize) -> Option<PathBuf> {
+    let script = ShellIntegration::init_script(shell, history_size)?;
 
     let basename = std::path::Path::new(shell)
         .file_stem()

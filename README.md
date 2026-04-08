@@ -147,6 +147,9 @@ session_ttl_days = 7
 # Maximum log file size per session (bytes, default 50 MB)
 max_log_bytes = 52428800
 
+# Number of commands to keep in shell history (default 500)
+command_history_size = 500
+
 # Default shell to spawn (if not specified on command line)
 # default_shell = "pwsh"
 ```

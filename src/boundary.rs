@@ -20,9 +20,10 @@ use crate::session::CommandEntry;
 pub struct ShellIntegration;
 
 impl ShellIntegration {
-    /// Returns an init script for the given shell that injects OSC 133 markers.
+    /// Returns an init script for the given shell that injects OSC 133 markers
+    /// and configures command history.
     /// Returns `None` if the shell is unsupported.
-    pub fn init_script(shell: &str) -> Option<String> {
+    pub fn init_script(shell: &str, history_size: usize) -> Option<String> {
         let basename = std::path::Path::new(shell)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -30,82 +31,105 @@ impl ShellIntegration {
             .to_lowercase();
 
         match basename.as_str() {
-            "pwsh" | "powershell" => Some(Self::pwsh_init()),
-            "bash" => Some(Self::bash_init()),
-            "zsh" => Some(Self::zsh_init()),
-            "fish" => Some(Self::fish_init()),
+            "pwsh" | "powershell" => Some(Self::pwsh_init(history_size)),
+            "bash" => Some(Self::bash_init(history_size)),
+            "zsh" => Some(Self::zsh_init(history_size)),
+            "fish" => Some(Self::fish_init(history_size)),
             _ => None,
         }
     }
 
-    fn pwsh_init() -> String {
-        r#"
-# termsnoop shell integration (OSC 133)
+    fn pwsh_init(history_size: usize) -> String {
+        format!(
+            r#"
+# termsnoop shell integration (OSC 133 + command history)
 # Uses history tracking to only emit D markers after actual command execution,
 # avoiding false triggers from prompt redraws (starship, oh-my-posh, etc.)
+
+# Configure PSReadLine command history
+Import-Module PSReadLine -ErrorAction SilentlyContinue
+Set-PSReadLineOption -MaximumHistoryCount {history_size} -HistorySaveStyle SaveIncrementally -ErrorAction SilentlyContinue
+Set-PSReadLineOption -PredictionSource History -ErrorAction SilentlyContinue
 
 $__termsnoop_orig_prompt = $function:prompt
 $global:__termsnoop_last_hist_id = -1
 
-function prompt {
-    $__tsExit = if ($global:?) { 0 } else { if ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 } }
+function prompt {{
+    $__tsExit = if ($global:?) {{ 0 }} else {{ if ($global:LASTEXITCODE) {{ $global:LASTEXITCODE }} else {{ 1 }} }}
     $curHist = (Get-History -Count 1 -ErrorAction SilentlyContinue)
-    $curId = if ($curHist) { $curHist.Id } else { 0 }
+    $curId = if ($curHist) {{ $curHist.Id }} else {{ 0 }}
 
     # Only emit D when a new command was actually executed (history ID advanced)
-    if ($curId -gt $global:__termsnoop_last_hist_id -and $global:__termsnoop_last_hist_id -ge 0) {
+    if ($curId -gt $global:__termsnoop_last_hist_id -and $global:__termsnoop_last_hist_id -ge 0) {{
         [Console]::Write("`e]133;D;$__tsExit`a")
-    }
+    }}
     $global:__termsnoop_last_hist_id = $curId
 
     # A: prompt start
     [Console]::Write("`e]133;A`a")
     $result = & $__termsnoop_orig_prompt
     # B embedded in return value so it appears after all prompt text
-    if ($result) { return "$result`e]133;B`a" } else { return "`e]133;B`a" }
-}
-"#
-        .to_string()
+    if ($result) {{ return "$result`e]133;B`a" }} else {{ return "`e]133;B`a" }}
+}}
+"#,
+            history_size = history_size
+        )
     }
 
-    fn bash_init() -> String {
-        r#"
-# termsnoop shell integration (OSC 133)
-__termsnoop_preexec() {
+    fn bash_init(history_size: usize) -> String {
+        format!(
+            r#"
+# termsnoop shell integration (OSC 133 + command history)
+HISTSIZE={history_size}
+HISTFILESIZE={history_size}
+shopt -s histappend
+
+__termsnoop_preexec() {{
     printf '\e]133;C\a'
-}
+}}
 trap '__termsnoop_preexec' DEBUG
 
 __termsnoop_orig_ps1="$PS1"
 PS1='\[\e]133;D;$?\a\]\[\e]133;A\a\]'"$__termsnoop_orig_ps1"'\[\e]133;B\a\]'
-"#
-        .to_string()
+"#,
+            history_size = history_size
+        )
     }
 
-    fn zsh_init() -> String {
-        r#"
-# termsnoop shell integration (OSC 133)
-__termsnoop_precmd() {
+    fn zsh_init(history_size: usize) -> String {
+        format!(
+            r#"
+# termsnoop shell integration (OSC 133 + command history)
+HISTSIZE={history_size}
+SAVEHIST={history_size}
+setopt APPEND_HISTORY INC_APPEND_HISTORY SHARE_HISTORY
+
+__termsnoop_precmd() {{
     print -Pn "\e]133;D;$?\a"
     print -Pn "\e]133;A\a"
-}
+}}
 
-__termsnoop_preexec() {
+__termsnoop_preexec() {{
     print -Pn "\e]133;C\a"
-}
+}}
 
 precmd_functions+=(__termsnoop_precmd)
 preexec_functions+=(__termsnoop_preexec)
 
 # Append B marker after prompt
-PS1="$PS1%{\e]133;B\a%}"
-"#
-        .to_string()
+PS1="$PS1%{{\e]133;B\a%}}"
+"#,
+            history_size = history_size
+        )
     }
 
-    fn fish_init() -> String {
-        r#"
-# termsnoop shell integration (OSC 133)
+    fn fish_init(history_size: usize) -> String {
+        format!(
+            r#"
+# termsnoop shell integration (OSC 133 + command history)
+set -g fish_history default
+set -g __fish_history_max {history_size}
+
 function __termsnoop_prompt --on-event fish_prompt
     set -l last $status
     printf "\e]133;D;%s\a" $last
@@ -126,8 +150,9 @@ end
 function __termsnoop_preexec --on-event fish_preexec
     printf "\e]133;C\a"
 end
-"#
-        .to_string()
+"#,
+            history_size = history_size
+        )
     }
 }
 

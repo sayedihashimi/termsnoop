@@ -14,6 +14,9 @@ pub struct Config {
 
     /// Default shell to spawn.
     pub default_shell: Option<String>,
+
+    /// Number of commands to keep in shell history (default 500).
+    pub command_history_size: usize,
 }
 
 impl Default for Config {
@@ -22,6 +25,7 @@ impl Default for Config {
             session_ttl_days: 7,
             max_log_bytes: 50 * 1024 * 1024,
             default_shell: None,
+            command_history_size: 500,
         }
     }
 }
