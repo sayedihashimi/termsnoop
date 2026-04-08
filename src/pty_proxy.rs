@@ -186,7 +186,20 @@ fn build_shell_command(shell: &str, init_script: &Option<PathBuf>) -> CommandBui
 // I/O forwarding
 // ---------------------------------------------------------------------------
 
-fn forward_stdin(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+/// Forward input to the PTY. On Windows, uses crossterm's event reader to
+/// properly handle arrow keys, function keys, and other special keys that
+/// the raw Win32 console doesn't translate to VT sequences via ReadFile.
+/// On Unix, reads raw bytes from stdin (already VT-encoded by the terminal).
+fn forward_stdin(writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+    #[cfg(windows)]
+    forward_stdin_events(writer, running);
+
+    #[cfg(not(windows))]
+    forward_stdin_raw(writer, running);
+}
+
+#[cfg(not(windows))]
+fn forward_stdin_raw(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut buf = [0u8; 1024];
@@ -201,6 +214,128 @@ fn forward_stdin(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+    use crossterm::event::{self, Event, KeyEvent};
+
+    while running.load(Ordering::Relaxed) {
+        // Poll with timeout so we can check the `running` flag
+        match event::poll(std::time::Duration::from_millis(50)) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
+        }
+
+        let event = match event::read() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+
+        let bytes: Option<Vec<u8>> = match event {
+            Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) => key_to_vt(code, modifiers),
+            Event::Paste(text) => Some(text.into_bytes()),
+            _ => None, // ignore resize, focus, mouse
+        };
+
+        if let Some(b) = bytes {
+            if writer.write_all(&b).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Translate a crossterm key event into the VT escape sequence bytes
+/// that a Unix terminal would send.
+#[cfg(windows)]
+fn key_to_vt(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Option<Vec<u8>> {
+    use crossterm::event::{KeyCode::*, KeyModifiers};
+
+    match code {
+        Char(c) => {
+            if mods.contains(KeyModifiers::CONTROL) {
+                // Ctrl+A = 0x01 .. Ctrl+Z = 0x1A
+                let lower = c.to_ascii_lowercase();
+                if lower.is_ascii_lowercase() {
+                    Some(vec![lower as u8 - b'a' + 1])
+                } else {
+                    // Ctrl with non-alpha (e.g. Ctrl+[, Ctrl+])
+                    let mut buf = [0u8; 4];
+                    Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+                }
+            } else if mods.contains(KeyModifiers::ALT) {
+                // Alt+key = ESC followed by the character
+                let mut buf = vec![0x1b];
+                let mut cbuf = [0u8; 4];
+                buf.extend_from_slice(c.encode_utf8(&mut cbuf).as_bytes());
+                Some(buf)
+            } else {
+                let mut buf = [0u8; 4];
+                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            }
+        }
+        Enter => Some(vec![b'\r']),
+        Backspace => Some(vec![0x7f]),
+        Tab => {
+            if mods.contains(KeyModifiers::SHIFT) {
+                Some(b"\x1b[Z".to_vec()) // reverse tab
+            } else {
+                Some(vec![b'\t'])
+            }
+        }
+        Esc => Some(vec![0x1b]),
+        Up => Some(arrow_seq(b'A', mods)),
+        Down => Some(arrow_seq(b'B', mods)),
+        Right => Some(arrow_seq(b'C', mods)),
+        Left => Some(arrow_seq(b'D', mods)),
+        Home => Some(b"\x1b[H".to_vec()),
+        End => Some(b"\x1b[F".to_vec()),
+        PageUp => Some(b"\x1b[5~".to_vec()),
+        PageDown => Some(b"\x1b[6~".to_vec()),
+        Insert => Some(b"\x1b[2~".to_vec()),
+        Delete => Some(b"\x1b[3~".to_vec()),
+        F(n) => f_key_seq(n),
+        _ => None,
+    }
+}
+
+/// Arrow key with optional Shift/Ctrl/Alt modifiers.
+#[cfg(windows)]
+fn arrow_seq(dir: u8, mods: crossterm::event::KeyModifiers) -> Vec<u8> {
+    use crossterm::event::KeyModifiers;
+    if mods.is_empty() {
+        return vec![0x1b, b'[', dir];
+    }
+    // Modified arrows: ESC [ 1 ; <mod> <dir>
+    let m = 1
+        + if mods.contains(KeyModifiers::SHIFT) { 1 } else { 0 }
+        + if mods.contains(KeyModifiers::ALT) { 2 } else { 0 }
+        + if mods.contains(KeyModifiers::CONTROL) { 4 } else { 0 };
+    format!("\x1b[1;{}{}", m, dir as char).into_bytes()
+}
+
+#[cfg(windows)]
+fn f_key_seq(n: u8) -> Option<Vec<u8>> {
+    let s = match n {
+        1 => "\x1bOP",
+        2 => "\x1bOQ",
+        3 => "\x1bOR",
+        4 => "\x1bOS",
+        5 => "\x1b[15~",
+        6 => "\x1b[17~",
+        7 => "\x1b[18~",
+        8 => "\x1b[19~",
+        9 => "\x1b[20~",
+        10 => "\x1b[21~",
+        11 => "\x1b[23~",
+        12 => "\x1b[24~",
+        _ => return None,
+    };
+    Some(s.as_bytes().to_vec())
 }
 
 fn forward_output(
