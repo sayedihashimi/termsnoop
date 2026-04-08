@@ -10,17 +10,17 @@ recent output from another terminal without the user needing to copy/paste.
 
 ```
 Terminal A (AI CLI)                Terminal B (User's work)
-┌──────────────────────┐          ┌──────────────────────────┐
-│  copilot cli          │          │  $ termsnoop               │
-│                       │          │  🟢 Session abc1234 started│
-│  > "check terminal"   │          │  $ npm run build           │
-│                       │          │  ERROR: Module not found   │
-│  [reads termsnoop      │◄────────│                            │
-│   session output]     │  file    │  (output logged to         │
-│                       │  based   │   ~/.termsnoop/sessions/)  │
-│  "I see the error,    │          │                            │
-│   let me fix it..."   │          │                            │
-└──────────────────────┘          └──────────────────────────┘
+┌──────────────────────┐          ┌────────────────────────────│─┐
+│  copilot cli         │          │  $ termsnoop                 │
+│                      │          │  () Session abc1234 started  │
+│  > "check terminal"  │          │  $ npm run build             │
+│                      │          │  ERROR: Module not found     │
+│  [reads termsnoop    │◄─────────│                              │
+│   session output]    │  file    │  (output logged to           │
+│                      │  based   │   ~/.termsnoop/sessions/)    │
+│  "I see the error,   │          │                              │
+│   let me fix it..."  │          │                              │
+└──────────────────────┘          └──────────────────────────────┘
 ```
 
 ## Installation
