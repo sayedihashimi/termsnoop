@@ -71,8 +71,10 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
         .append(true)
         .open(&log_path)?;
 
-    // Enter raw mode
+    // Enter raw mode and enable VT input (so arrow keys send escape sequences)
     crossterm::terminal::enable_raw_mode()?;
+    #[cfg(windows)]
+    enable_virtual_terminal_input();
     let _raw_guard = RawModeGuard;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -236,5 +238,28 @@ fn default_shell() -> String {
         "pwsh".into()
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    }
+}
+
+/// Enable ENABLE_VIRTUAL_TERMINAL_INPUT on Windows so arrow keys, Home, End,
+/// etc. are sent as VT escape sequences through the PTY.
+#[cfg(windows)]
+fn enable_virtual_terminal_input() {
+    use std::os::windows::io::AsRawHandle;
+
+    extern "system" {
+        fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
+    }
+
+    let stdin = std::io::stdin();
+    let handle = stdin.as_raw_handle();
+
+    unsafe {
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) != 0 {
+            const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT);
+        }
     }
 }
