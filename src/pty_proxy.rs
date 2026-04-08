@@ -18,7 +18,7 @@ impl Drop for RawModeGuard {
     }
 }
 
-pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> {
+pub fn start_session(name: Option<String>, shell: Option<String>, debug: bool) -> Result<()> {
     let cfg = Config::load().unwrap_or_default();
     let shell_cmd = shell
         .or(cfg.default_shell.clone())
@@ -28,6 +28,26 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
 
     // Write shell integration init script (if available for this shell)
     let init_script_path = write_init_script(&session_dir, &shell_cmd, cfg.command_history_size);
+
+    // Open debug log if requested
+    let debug_log = if debug {
+        let home = dirs::home_dir().unwrap_or_default();
+        let debug_path = home.join(".termsnoop").join("debug.log");
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&debug_path)?;
+        eprintln!("   Debug log: {}", debug_path.display());
+        Some(Arc::new(std::sync::Mutex::new(f)))
+    } else {
+        None
+    };
+
+    if let Some(ref dl) = debug_log {
+        debug_write(dl, "=== Session started ===");
+        debug_write(dl, &format!("Shell: {}", shell_cmd));
+        debug_write(dl, &format!("OS: {}", std::env::consts::OS));
+    }
 
     eprintln!("🟢 Session {} started (shell: {})", meta.id, shell_cmd);
     eprintln!("   Logging to: {}", session_dir.display());
@@ -74,15 +94,21 @@ pub fn start_session(name: Option<String>, shell: Option<String>) -> Result<()> 
     // Enter raw mode and enable VT input (so arrow keys send escape sequences)
     crossterm::terminal::enable_raw_mode()?;
     #[cfg(windows)]
-    enable_virtual_terminal_input();
+    {
+        enable_virtual_terminal_input();
+        if let Some(ref dl) = debug_log {
+            log_console_mode(dl);
+        }
+    }
     let _raw_guard = RawModeGuard;
 
     let running = Arc::new(AtomicBool::new(true));
 
     // stdin → PTY
     let running_w = running.clone();
+    let dl_clone = debug_log.clone();
     let _stdin_thread = std::thread::spawn(move || {
-        forward_stdin(writer, running_w);
+        forward_stdin(writer, running_w, dl_clone);
     });
 
     // PTY → stdout + log + command boundary tracking
@@ -182,6 +208,36 @@ fn build_shell_command(shell: &str, init_script: &Option<PathBuf>) -> CommandBui
     }
 }
 
+type DebugLog = Option<Arc<std::sync::Mutex<std::fs::File>>>;
+
+fn debug_write(log: &Arc<std::sync::Mutex<std::fs::File>>, msg: &str) {
+    if let Ok(mut f) = log.lock() {
+        let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S%.3f"), msg);
+        let _ = f.flush();
+    }
+}
+
+#[cfg(windows)]
+fn log_console_mode(log: &Arc<std::sync::Mutex<std::fs::File>>) {
+    use std::os::windows::io::AsRawHandle;
+    extern "system" {
+        fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+    }
+    let stdin = std::io::stdin();
+    let handle = stdin.as_raw_handle();
+    let mut mode: u32 = 0;
+    let result = unsafe { GetConsoleMode(handle, &mut mode) };
+    debug_write(
+        log,
+        &format!(
+            "Console mode: 0x{:04X} (GetConsoleMode returned {}), VT_INPUT={}",
+            mode,
+            result,
+            if mode & 0x0200 != 0 { "ON" } else { "OFF" }
+        ),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // I/O forwarding
 // ---------------------------------------------------------------------------
@@ -190,24 +246,32 @@ fn build_shell_command(shell: &str, init_script: &Option<PathBuf>) -> CommandBui
 /// properly handle arrow keys, function keys, and other special keys that
 /// the raw Win32 console doesn't translate to VT sequences via ReadFile.
 /// On Unix, reads raw bytes from stdin (already VT-encoded by the terminal).
-fn forward_stdin(writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+fn forward_stdin(writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
     #[cfg(windows)]
-    forward_stdin_events(writer, running);
+    forward_stdin_events(writer, running, debug_log);
 
     #[cfg(not(windows))]
-    forward_stdin_raw(writer, running);
+    forward_stdin_raw(writer, running, debug_log);
 }
 
 #[cfg(not(windows))]
-fn forward_stdin_raw(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+fn forward_stdin_raw(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut buf = [0u8; 1024];
+
+    if let Some(ref dl) = debug_log {
+        debug_write(dl, "stdin reader: using raw mode (Unix)");
+    }
 
     while running.load(Ordering::Relaxed) {
         match handle.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                if let Some(ref dl) = debug_log {
+                    let hex: Vec<String> = buf[..n].iter().map(|b| format!("0x{:02X}", b)).collect();
+                    debug_write(dl, &format!("stdin raw: {} bytes: {}", n, hex.join(" ")));
+                }
                 if writer.write_all(&buf[..n]).is_err() {
                     break;
                 }
@@ -217,8 +281,12 @@ fn forward_stdin_raw(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>
 }
 
 #[cfg(windows)]
-fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>) {
+fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
     use crossterm::event::{self, Event, KeyEvent};
+
+    if let Some(ref dl) = debug_log {
+        debug_write(dl, "stdin reader: using crossterm event reader (Windows)");
+    }
 
     while running.load(Ordering::Relaxed) {
         // Poll with timeout so we can check the `running` flag
@@ -230,8 +298,17 @@ fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBo
 
         let event = match event::read() {
             Ok(e) => e,
-            Err(_) => break,
+            Err(e) => {
+                if let Some(ref dl) = debug_log {
+                    debug_write(dl, &format!("event::read() error: {}", e));
+                }
+                break;
+            }
         };
+
+        if let Some(ref dl) = debug_log {
+            debug_write(dl, &format!("Event: {:?}", event));
+        }
 
         let bytes: Option<Vec<u8>> = match event {
             Event::Key(KeyEvent {
@@ -241,10 +318,19 @@ fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBo
             _ => None, // ignore resize, focus, mouse
         };
 
-        if let Some(b) = bytes {
-            if writer.write_all(&b).is_err() {
+        if let Some(ref b) = bytes {
+            if let Some(ref dl) = debug_log {
+                let hex: Vec<String> = b.iter().map(|byte| format!("0x{:02X}", byte)).collect();
+                debug_write(dl, &format!("  -> sending {} bytes: {}", b.len(), hex.join(" ")));
+            }
+            if writer.write_all(b).is_err() {
+                if let Some(ref dl) = debug_log {
+                    debug_write(dl, "  -> write to PTY failed!");
+                }
                 break;
             }
+        } else if let Some(ref dl) = debug_log {
+            debug_write(dl, "  -> (no bytes to send)");
         }
     }
 }

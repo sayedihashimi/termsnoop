@@ -23,8 +23,8 @@ async fn main() -> Result<()> {
         }) => session::read_session(session_id, last_commands, tail, json)?,
         Some(Commands::Clean { days }) => session::clean_sessions(days)?,
         Some(Commands::McpServer) => mcp::run_server().await?,
-        Some(Commands::Start { name, shell }) => pty_proxy::start_session(name, shell)?,
-        None => pty_proxy::start_session(None, None)?,
+        Some(Commands::Start { name, shell, debug }) => pty_proxy::start_session(name, shell, debug)?,
+        None => pty_proxy::start_session(None, None, false)?,
     }
 
     Ok(())

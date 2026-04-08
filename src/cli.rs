@@ -21,6 +21,9 @@ pub enum Commands {
         /// Shell to spawn (default: pwsh on Windows, $SHELL on Unix)
         #[arg(long)]
         shell: Option<String>,
+        /// Write input diagnostics to ~/.termsnoop/debug.log
+        #[arg(long)]
+        debug: bool,
     },
     /// List active and recent sessions
     List,
