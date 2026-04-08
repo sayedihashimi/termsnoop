@@ -242,13 +242,12 @@ fn log_console_mode(log: &Arc<std::sync::Mutex<std::fs::File>>) {
 // I/O forwarding
 // ---------------------------------------------------------------------------
 
-/// Forward input to the PTY. On Windows, uses crossterm's event reader to
-/// properly handle arrow keys, function keys, and other special keys that
-/// the raw Win32 console doesn't translate to VT sequences via ReadFile.
+/// Forward input to the PTY. On Windows, uses ReadConsoleInputW to
+/// properly handle arrow keys, function keys, and other special keys.
 /// On Unix, reads raw bytes from stdin (already VT-encoded by the terminal).
 fn forward_stdin(writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
     #[cfg(windows)]
-    forward_stdin_events(writer, running, debug_log);
+    forward_stdin_win32(writer, running, debug_log);
 
     #[cfg(not(windows))]
     forward_stdin_raw(writer, running, debug_log);
@@ -281,127 +280,229 @@ fn forward_stdin_raw(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>
 }
 
 #[cfg(windows)]
-fn forward_stdin_events(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
-    use crossterm::event::{self, Event, KeyEvent};
+mod win32 {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct KeyEventRecord {
+        pub key_down: i32,
+        pub repeat_count: u16,
+        pub virtual_key_code: u16,
+        pub virtual_scan_code: u16,
+        pub uchar: u16,
+        pub control_key_state: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct InputRecord {
+        pub event_type: u16,
+        pub _padding: u16,
+        pub event: [u8; 16],
+    }
+
+    pub const KEY_EVENT: u16 = 0x0001;
+    pub const WAIT_TIMEOUT: u32 = 258;
+
+    extern "system" {
+        pub fn ReadConsoleInputW(
+            handle: *mut std::ffi::c_void,
+            buffer: *mut InputRecord,
+            length: u32,
+            events_read: *mut u32,
+        ) -> i32;
+        pub fn WaitForSingleObject(handle: *mut std::ffi::c_void, timeout_ms: u32) -> u32;
+    }
+}
+
+/// Read console input events directly via Win32 API and translate to VT sequences.
+/// This avoids crossterm's self-pipe mechanism which interferes with ConPTY.
+#[cfg(windows)]
+fn forward_stdin_win32(mut writer: Box<dyn Write + Send>, running: Arc<AtomicBool>, debug_log: DebugLog) {
+    use std::os::windows::io::AsRawHandle;
+    use win32::*;
+
+    let stdin = std::io::stdin();
+    let handle = stdin.as_raw_handle();
 
     if let Some(ref dl) = debug_log {
-        debug_write(dl, "stdin reader: using crossterm event reader (Windows)");
+        debug_write(dl, &format!("stdin reader: using Win32 ReadConsoleInputW, handle={:?}", handle));
     }
 
     while running.load(Ordering::Relaxed) {
-        // Poll with timeout so we can check the `running` flag
-        match event::poll(std::time::Duration::from_millis(50)) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => break,
+        // Wait with timeout so we can check `running`
+        let wait_result = unsafe { WaitForSingleObject(handle, 50) };
+        if wait_result == WAIT_TIMEOUT {
+            continue;
         }
 
-        let event = match event::read() {
-            Ok(e) => e,
-            Err(e) => {
-                if let Some(ref dl) = debug_log {
-                    debug_write(dl, &format!("event::read() error: {}", e));
-                }
-                break;
-            }
+        let mut record = InputRecord {
+            event_type: 0,
+            _padding: 0,
+            event: [0u8; 16],
         };
+        let mut events_read: u32 = 0;
+
+        let ok = unsafe {
+            ReadConsoleInputW(handle, &mut record, 1, &mut events_read)
+        };
+
+        if ok == 0 || events_read == 0 {
+            if let Some(ref dl) = debug_log {
+                debug_write(dl, &format!("ReadConsoleInputW failed or no events (ok={}, read={})", ok, events_read));
+            }
+            break;
+        }
+
+        if record.event_type != KEY_EVENT {
+            continue;
+        }
+
+        let key: KeyEventRecord = unsafe { std::ptr::read(record.event.as_ptr() as *const KeyEventRecord) };
+
+        // Only process key-down events
+        if key.key_down == 0 {
+            continue;
+        }
 
         if let Some(ref dl) = debug_log {
-            debug_write(dl, &format!("Event: {:?}", event));
+            debug_write(dl, &format!(
+                "Key: vk=0x{:02X} scan=0x{:02X} char=0x{:04X}({}) mods=0x{:X} repeat={}",
+                key.virtual_key_code,
+                key.virtual_scan_code,
+                key.uchar,
+                if key.uchar >= 0x20 && key.uchar < 0x7F {
+                    char::from(key.uchar as u8).to_string()
+                } else {
+                    "?".to_string()
+                },
+                key.control_key_state,
+                key.repeat_count,
+            ));
         }
 
-        let bytes: Option<Vec<u8>> = match event {
-            Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) => key_to_vt(code, modifiers),
-            Event::Paste(text) => Some(text.into_bytes()),
-            _ => None, // ignore resize, focus, mouse
-        };
+        let bytes = win32_key_to_bytes(&key);
 
         if let Some(ref b) = bytes {
             if let Some(ref dl) = debug_log {
                 let hex: Vec<String> = b.iter().map(|byte| format!("0x{:02X}", byte)).collect();
-                debug_write(dl, &format!("  -> sending {} bytes: {}", b.len(), hex.join(" ")));
+                debug_write(dl, &format!("  -> sending: {}", hex.join(" ")));
             }
-            if writer.write_all(b).is_err() {
-                if let Some(ref dl) = debug_log {
-                    debug_write(dl, "  -> write to PTY failed!");
+            for _ in 0..key.repeat_count.max(1) {
+                if writer.write_all(b).is_err() {
+                    return;
                 }
-                break;
             }
-        } else if let Some(ref dl) = debug_log {
-            debug_write(dl, "  -> (no bytes to send)");
         }
     }
 }
 
-/// Translate a crossterm key event into the VT escape sequence bytes
-/// that a Unix terminal would send.
+/// Translate a Win32 key event to VT escape sequence bytes.
 #[cfg(windows)]
-fn key_to_vt(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Option<Vec<u8>> {
-    use crossterm::event::{KeyCode::*, KeyModifiers};
+fn win32_key_to_bytes(key: &win32::KeyEventRecord) -> Option<Vec<u8>> {
+    const VK_BACK: u16 = 0x08;
+    const VK_TAB: u16 = 0x09;
+    const VK_RETURN: u16 = 0x0D;
+    const VK_ESCAPE: u16 = 0x1B;
+    const VK_PRIOR: u16 = 0x21;  // Page Up
+    const VK_NEXT: u16 = 0x22;   // Page Down
+    const VK_END: u16 = 0x23;
+    const VK_HOME: u16 = 0x24;
+    const VK_LEFT: u16 = 0x25;
+    const VK_UP: u16 = 0x26;
+    const VK_RIGHT: u16 = 0x27;
+    const VK_DOWN: u16 = 0x28;
+    const VK_INSERT: u16 = 0x2D;
+    const VK_DELETE: u16 = 0x2E;
+    const VK_F1: u16 = 0x70;
+    const VK_F12: u16 = 0x7B;
 
-    match code {
-        Char(c) => {
-            if mods.contains(KeyModifiers::CONTROL) {
-                // Ctrl+A = 0x01 .. Ctrl+Z = 0x1A
-                let lower = c.to_ascii_lowercase();
-                if lower.is_ascii_lowercase() {
-                    Some(vec![lower as u8 - b'a' + 1])
-                } else {
-                    // Ctrl with non-alpha (e.g. Ctrl+[, Ctrl+])
-                    let mut buf = [0u8; 4];
-                    Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+    const LEFT_CTRL: u32 = 0x0008;
+    const RIGHT_CTRL: u32 = 0x0004;
+    const LEFT_ALT: u32 = 0x0002;
+    const RIGHT_ALT: u32 = 0x0001;
+    const SHIFT: u32 = 0x0010;
+
+    let ctrl = key.control_key_state & (LEFT_CTRL | RIGHT_CTRL) != 0;
+    let alt = key.control_key_state & (LEFT_ALT | RIGHT_ALT) != 0;
+    let shift = key.control_key_state & SHIFT != 0;
+
+    // If the character is non-zero, it's a regular character input
+    if key.uchar != 0 {
+        let ch = key.uchar;
+        match key.virtual_key_code {
+            VK_RETURN => return Some(vec![b'\r']),
+            VK_BACK => return Some(vec![0x7f]),
+            VK_TAB => {
+                if shift {
+                    return Some(b"\x1b[Z".to_vec());
                 }
-            } else if mods.contains(KeyModifiers::ALT) {
-                // Alt+key = ESC followed by the character
+                return Some(vec![b'\t']);
+            }
+            VK_ESCAPE => return Some(vec![0x1b]),
+            _ => {}
+        }
+
+        // Ctrl+key combinations (char value is already the control code)
+        if ctrl && ch < 0x20 {
+            if alt {
+                return Some(vec![0x1b, ch as u8]);
+            }
+            return Some(vec![ch as u8]);
+        }
+
+        // Alt+key
+        if alt && !ctrl {
+            if let Some(c) = char::from_u32(ch as u32) {
                 let mut buf = vec![0x1b];
                 let mut cbuf = [0u8; 4];
                 buf.extend_from_slice(c.encode_utf8(&mut cbuf).as_bytes());
-                Some(buf)
-            } else {
-                let mut buf = [0u8; 4];
-                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+                return Some(buf);
             }
         }
-        Enter => Some(vec![b'\r']),
-        Backspace => Some(vec![0x7f]),
-        Tab => {
-            if mods.contains(KeyModifiers::SHIFT) {
-                Some(b"\x1b[Z".to_vec()) // reverse tab
-            } else {
-                Some(vec![b'\t'])
-            }
+
+        // Regular character (may be Unicode)
+        if let Some(c) = char::from_u32(ch as u32) {
+            let mut buf = [0u8; 4];
+            return Some(c.encode_utf8(&mut buf).as_bytes().to_vec());
         }
-        Esc => Some(vec![0x1b]),
-        Up => Some(arrow_seq(b'A', mods)),
-        Down => Some(arrow_seq(b'B', mods)),
-        Right => Some(arrow_seq(b'C', mods)),
-        Left => Some(arrow_seq(b'D', mods)),
-        Home => Some(b"\x1b[H".to_vec()),
-        End => Some(b"\x1b[F".to_vec()),
-        PageUp => Some(b"\x1b[5~".to_vec()),
-        PageDown => Some(b"\x1b[6~".to_vec()),
-        Insert => Some(b"\x1b[2~".to_vec()),
-        Delete => Some(b"\x1b[3~".to_vec()),
-        F(n) => f_key_seq(n),
+    }
+
+    // Virtual key codes for special keys (no character generated)
+    let modifier_param = if ctrl || alt || shift {
+        let m = 1
+            + if shift { 1 } else { 0 }
+            + if alt { 2 } else { 0 }
+            + if ctrl { 4 } else { 0 };
+        Some(m)
+    } else {
+        None
+    };
+
+    match key.virtual_key_code {
+        VK_UP => Some(arrow_with_mod(b'A', modifier_param)),
+        VK_DOWN => Some(arrow_with_mod(b'B', modifier_param)),
+        VK_RIGHT => Some(arrow_with_mod(b'C', modifier_param)),
+        VK_LEFT => Some(arrow_with_mod(b'D', modifier_param)),
+        VK_HOME => Some(b"\x1b[H".to_vec()),
+        VK_END => Some(b"\x1b[F".to_vec()),
+        VK_INSERT => Some(b"\x1b[2~".to_vec()),
+        VK_DELETE => Some(b"\x1b[3~".to_vec()),
+        VK_PRIOR => Some(b"\x1b[5~".to_vec()),
+        VK_NEXT => Some(b"\x1b[6~".to_vec()),
+        vk @ VK_F1..=VK_F12 => {
+            let fkey = (vk - VK_F1 + 1) as u8;
+            f_key_seq(fkey)
+        }
         _ => None,
     }
 }
 
-/// Arrow key with optional Shift/Ctrl/Alt modifiers.
 #[cfg(windows)]
-fn arrow_seq(dir: u8, mods: crossterm::event::KeyModifiers) -> Vec<u8> {
-    use crossterm::event::KeyModifiers;
-    if mods.is_empty() {
-        return vec![0x1b, b'[', dir];
+fn arrow_with_mod(dir: u8, modifier: Option<u32>) -> Vec<u8> {
+    match modifier {
+        None => vec![0x1b, b'[', dir],
+        Some(m) => format!("\x1b[1;{}{}", m, dir as char).into_bytes(),
     }
-    // Modified arrows: ESC [ 1 ; <mod> <dir>
-    let m = 1
-        + if mods.contains(KeyModifiers::SHIFT) { 1 } else { 0 }
-        + if mods.contains(KeyModifiers::ALT) { 2 } else { 0 }
-        + if mods.contains(KeyModifiers::CONTROL) { 4 } else { 0 };
-    format!("\x1b[1;{}{}", m, dir as char).into_bytes()
 }
 
 #[cfg(windows)]
