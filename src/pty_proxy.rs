@@ -91,11 +91,14 @@ pub fn start_session(name: Option<String>, shell: Option<String>, debug: bool) -
         .append(true)
         .open(&log_path)?;
 
-    // Enter raw mode and enable VT input (so arrow keys send escape sequences)
+    // Enter raw mode (disables line editing and echo)
     crossterm::terminal::enable_raw_mode()?;
+    // NOTE: Do NOT set ENABLE_VIRTUAL_TERMINAL_INPUT on Windows.
+    // It causes Windows Terminal to use win32-input-mode encoding,
+    // which sends key events as VT sequences with vk=0 instead of
+    // proper console key events. ReadConsoleInputW handles keys directly.
     #[cfg(windows)]
     {
-        enable_virtual_terminal_input();
         if let Some(ref dl) = debug_log {
             log_console_mode(dl);
         }
@@ -560,28 +563,5 @@ fn default_shell() -> String {
         "pwsh".into()
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-    }
-}
-
-/// Enable ENABLE_VIRTUAL_TERMINAL_INPUT on Windows so arrow keys, Home, End,
-/// etc. are sent as VT escape sequences through the PTY.
-#[cfg(windows)]
-fn enable_virtual_terminal_input() {
-    use std::os::windows::io::AsRawHandle;
-
-    extern "system" {
-        fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
-        fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
-    }
-
-    let stdin = std::io::stdin();
-    let handle = stdin.as_raw_handle();
-
-    unsafe {
-        let mut mode: u32 = 0;
-        if GetConsoleMode(handle, &mut mode) != 0 {
-            const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
-            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT);
-        }
     }
 }
