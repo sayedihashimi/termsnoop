@@ -1,13 +1,6 @@
 ---
 name: termsnoop
-description: Read terminal output from a user's other terminal sessions
-triggers:
-  - "check my terminal"
-  - "what error"
-  - "terminal output"
-  - "what happened in my terminal"
-  - "read my terminal"
-  - "look at my other terminal"
+description: Read terminal output from a user's other terminal sessions. Use when the user asks to check their terminal, look at errors, or reference output from commands they ran elsewhere.
 ---
 
 # termsnoop — Terminal Output Reader

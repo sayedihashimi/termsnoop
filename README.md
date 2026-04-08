@@ -107,9 +107,9 @@ The MCP server exposes two tools:
 
 ### Copilot CLI Skill
 
-A skill file is included at `.github/copilot/termsnoop.md`. When installed,
-Copilot CLI will automatically invoke termsnoop when you say things like
-"check my terminal" or "what error".
+A skill file is included at `.github/skills/termsnoop/SKILL.md`. When present in a
+repository, Copilot CLI will automatically invoke termsnoop when you ask it to
+check your terminal, look at errors, or reference output from another terminal.
 
 ## Session Storage
 
