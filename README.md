@@ -31,43 +31,54 @@ Terminal A (AI CLI)                Terminal B (User's work)
 
 ## Installation
 
-### Rust implementation (from source)
+### Rust (PTY proxy)
 
 ```bash
 cd rust
 cargo install --path .
 ```
 
+### PowerShell (transcript)
+
+```powershell
+Import-Module ./powershell/termsnoop.psd1
+```
+
+Or add to your `$PROFILE` for auto-loading.
+
 ### From GitHub Releases
 
-Download the latest binary for your platform from
+Download the latest Rust binary for your platform from
 [Releases](../../releases) and add it to your `PATH`.
 
 ## Quick Start
 
-**1. Start a captured session:**
+### Rust (any shell)
 
 ```bash
+# Start a captured session (spawns a new shell via PTY proxy)
 termsnoop start
-```
 
-This spawns your default shell inside a PTY proxy. Everything you type and see
-is logged. Use the terminal normally — run builds, tests, whatever.
-
-**2. From another terminal, read the output:**
-
-```bash
-# List sessions
-termsnoop list
-
-# Read last 3 commands with structured output
+# From another terminal, read the output
 termsnoop read --last-commands 3 --json
-
-# Read last 50 lines of raw output
-termsnoop read --tail 50
 
 # Exit the captured session when done
 exit
+```
+
+### PowerShell
+
+```powershell
+# Start capture in your current session (no new shell spawned)
+Import-Module termsnoop
+Start-TermSnoop
+
+# From another terminal, read the output
+Import-Module termsnoop
+Read-TermSnoopSession -LastCommands 3 -Json
+
+# Stop when done
+Stop-TermSnoop
 ```
 
 ## CLI Reference
@@ -114,9 +125,11 @@ The MCP server exposes two tools:
 
 ### Copilot CLI Skill
 
-A skill file is included at `.github/skills/termsnoop/SKILL.md`. When present in a
-repository, Copilot CLI will automatically invoke termsnoop when you ask it to
-check your terminal, look at errors, or reference output from another terminal.
+Each implementation includes its own skill file. Copy the skill folder from
+whichever implementation you use into your project's `.github/skills/` directory:
+
+- Rust: `rust/skills/termsnoop/SKILL.md`
+- PowerShell: `powershell/skills/termsnoop/SKILL.md`
 
 ## Session Storage
 
@@ -187,12 +200,21 @@ termsnoop is built in Rust with three layers:
 ### Rust
 
 ```bash
-git clone https://github.com/user/termsnoop.git
-cd termsnoop/rust
-
+cd rust
 cargo build --release
 cargo test
 cargo install --path .
+```
+
+### PowerShell
+
+No build step needed. Run tests with:
+
+```powershell
+cd powershell
+Install-Module Pester -Force -SkipPublisherCheck -MinimumVersion 5.0
+Import-Module Pester -MinimumVersion 5.0
+Invoke-Pester -Path ./tests/termsnoop.tests.ps1 -Output Detailed
 ```
 
 ## License

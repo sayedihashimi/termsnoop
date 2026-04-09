@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
+  rust-build-and-test:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -46,3 +46,23 @@ jobs:
       - name: Clippy lints
         run: cargo clippy -- -D warnings
         working-directory: rust
+
+  powershell-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Force -SkipPublisherCheck -Scope CurrentUser -MinimumVersion 5.0
+
+      - name: Run Pester tests
+        shell: pwsh
+        working-directory: powershell
+        run: |
+          Import-Module Pester -MinimumVersion 5.0
+          $result = Invoke-Pester -Path './tests/termsnoop.tests.ps1' -Output Detailed -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }
