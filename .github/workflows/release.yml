@@ -40,18 +40,19 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+        working-directory: rust
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../termsnoop-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          cd rust/target/${{ matrix.target }}/release
+          tar czf ../../../../termsnoop-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../termsnoop-${{ matrix.target }}.zip
+          cd rust/target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../../termsnoop-${{ matrix.target }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -2,9 +2,15 @@
 
 **Terminal capture for AI CLI integration.**
 
-`termsnoop` creates a captured shell session via a PTY proxy. All terminal I/O is
-logged to session-scoped files. AI tools (Copilot CLI, Claude CLI, etc.) can read
-recent output from another terminal without the user needing to copy/paste.
+`termsnoop` captures terminal output so AI tools (Copilot CLI, Claude CLI, etc.)
+can read it without the user needing to copy/paste.
+
+## Implementations
+
+| Implementation | Directory | Description |
+|---------------|-----------|-------------|
+| **Rust (PTY proxy)** | [`rust/`](rust/) | Full PTY proxy that spawns a captured shell session. Cross-platform, supports interactive programs. |
+| **PowerShell (transcript)** | [`powershell/`](powershell/) | Lightweight approach using PowerShell's `Start-Transcript`. PowerShell-only, simpler setup. |
 
 ## How It Works
 
@@ -25,9 +31,10 @@ Terminal A (AI CLI)                Terminal B (User's work)
 
 ## Installation
 
-### From source (cargo)
+### Rust implementation (from source)
 
 ```bash
+cd rust
 cargo install --path .
 ```
 
@@ -177,18 +184,14 @@ termsnoop is built in Rust with three layers:
 
 ## Building from Source
 
+### Rust
+
 ```bash
-# Clone
 git clone https://github.com/user/termsnoop.git
-cd termsnoop
+cd termsnoop/rust
 
-# Build
 cargo build --release
-
-# Run tests
 cargo test
-
-# Install locally
 cargo install --path .
 ```
 
